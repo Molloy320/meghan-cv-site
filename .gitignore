@@ -39,3 +39,11 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+# RAG temp files
+data/_tmp_txt/
+
+# Raw PDFs (embedded already)
+data/pdfs/
+
+# Old ingestion script
+scripts/ingest-local.js
