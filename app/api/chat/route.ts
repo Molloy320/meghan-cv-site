@@ -9,9 +9,10 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// Load embedded vectors at startup
+type VectorRow = { embedding: number[]; text: string };
+
 const vectorsPath = path.join(process.cwd(), "data", "vectors.json");
-const vectors = JSON.parse(fs.readFileSync(vectorsPath, "utf8"));
+const vectors: VectorRow[] = JSON.parse(fs.readFileSync(vectorsPath, "utf8"));
 
 function cosineSimilarity(a: number[], b: number[]) {
   const dot = a.reduce((sum, val, i) => sum + val * b[i], 0);
@@ -22,68 +23,79 @@ function cosineSimilarity(a: number[], b: number[]) {
 
 export async function POST(req: NextRequest) {
   try {
-    const { prompt } = await req.json();
+    const body = await req.json();
 
-    if (!prompt) {
+    // Support both shapes: { message: "..."} (your chat UI) OR { prompt: "..."} (older version)
+    const userText: string = (body?.message ?? body?.prompt ?? "").trim();
+
+    if (!userText) {
       return NextResponse.json(
-        { error: "No prompt provided" },
+        { error: "Missing message. Send JSON: { message: \"...\" }" },
         { status: 400 }
       );
     }
 
-    // Create embedding for the user query
+    if (!process.env.OPENAI_API_KEY) {
+      return NextResponse.json(
+        { error: "Server missing OPENAI_API_KEY environment variable." },
+        { status: 500 }
+      );
+    }
+
+    // Embed query
     const embeddingResponse = await openai.embeddings.create({
       model: "text-embedding-3-small",
-      input: prompt,
+      input: userText,
     });
 
     const queryEmbedding = embeddingResponse.data[0].embedding;
 
-    // Rank stored chunks by similarity
+    // Retrieve top chunks
     const ranked = vectors
-      .map((v: any) => ({
+      .map((v) => ({
         text: v.text,
         score: cosineSimilarity(queryEmbedding, v.embedding),
       }))
-      .sort((a: any, b: any) => b.score - a.score)
+      .sort((a, b) => b.score - a.score)
       .slice(0, 5);
 
-    const context = ranked.map((r: any) => r.text).join("\n\n");
+    const context = ranked.map((r) => r.text).join("\n\n");
 
-    // Generate final answer
+    // Generate answer (no sources)
     const chatResponse = await openai.chat.completions.create({
       model: "gpt-4o-mini",
+      temperature: 0.4,
       messages: [
         {
           role: "system",
-          content: `
-You are Meghan Molloy’s personal AI assistant on her portfolio website.
+          content: `You are Meghan Molloy’s personal AI assistant on her portfolio website.
 
-Speak in a friendly, natural, and confident tone — like someone who knows her well.
+Speak in a friendly, natural, confident tone — like someone who knows her well.
 Keep answers clear and conversational, not long or resume-like.
 
 Rules:
 - Start with a direct answer
 - Avoid long paragraphs unless asked
-- Do NOT mention sources, files, or internal data
+- Do NOT mention sources, files, chunks, or internal data
 - Do NOT sound corporate or overly formal
-- You may offer to explain more if helpful
-`,
+- If you’re not sure, say so briefly and offer what you can`,
         },
         {
           role: "user",
-          content: `Context:\n${context}\n\nQuestion:\n${prompt}`,
+          content: `Context:\n${context}\n\nQuestion:\n${userText}`,
         },
       ],
     });
 
-    const answer = chatResponse.choices[0].message.content;
+    const answer = chatResponse.choices?.[0]?.message?.content?.trim() || "";
 
     return NextResponse.json({ answer });
-  } catch (error: any) {
-    console.error("Chat API error:", error);
+  } catch (err: any) {
+    console.error("API /api/chat error:", err);
+
+    // Try to return something usable to the UI
     return NextResponse.json(
-      { error: "Something went wrong processing the request." },
+      { error: "Chat API crashed. Check Vercel logs for details." },
       { status: 500 }
     );
   }
