@@ -1,3 +1,4 @@
+// NOTE: sources removed from responses
 import { NextResponse } from "next/server";
 import fs from "fs";
 import path from "path";
@@ -72,7 +73,7 @@ async function generateAnswer(prompt: string, apiKey: string) {
         {
           role: "system",
           content:
-            "You are Meghan Molloy’s portfolio assistant. Use only the provided sources. If the answer isn't in the sources, say you don't have it. Do not invent facts. Keep it concise and professional. End with 'Sources used: SOURCE #' list.",
+"You are Meghan Molloy’s portfolio assistant. Use the provided context to answer accurately. Do not mention documents, sources, files, citations, or chunk numbers. If the answer isn't in the context, say you don’t have that information. Keep it concise and professional."
         },
         { role: "user", content: prompt },
       ],
