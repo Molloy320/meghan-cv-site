@@ -3,10 +3,9 @@ import type { Metadata } from "next";
 import Header from "../components/Header";
 import Footer from "../components/Footer";
 
-
 export const metadata: Metadata = {
   title: "Meghan Molloy",
-  description: "Portfolio and AI chat experience for Meghan Molloy.",
+  description: "Creative, marketing, and technology professional",
 };
 
 export default function RootLayout({
@@ -16,9 +15,9 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body className="bg-black text-white">
+      <body className="min-h-screen flex flex-col bg-black text-white">
         <Header />
-        {children}
+        <main className="flex-1">{children}</main>
         <Footer />
       </body>
     </html>
