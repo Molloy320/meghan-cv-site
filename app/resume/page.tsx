@@ -78,12 +78,14 @@ export default function ResumePage() {
 
       {/* DOWNLOAD */}
       <section className="mt-10">
-        <a
-          href="/Molloy_Resume_2026.pdf"
-          className="inline-block rounded-xl border px-6 py-3 text-sm hover:bg-black hover:text-white"
-        >
-          Download Resume (PDF)
-        </a>
+       <a
+  href="/meghan-molloy-resume.pdf"
+  download
+  className="inline-flex items-center justify-center rounded-full bg-white px-4 py-2 text-sm font-medium text-black transition hover:bg-white/90"
+>
+  Download Resume
+</a>
+
       </section>
     </main>
   );
