@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
-import OpenAI from "openai";
 import fs from "fs";
 import path from "path";
+import OpenAI from "openai";
 
 export const runtime = "nodejs";
 
@@ -11,58 +11,73 @@ const openai = new OpenAI({
 
 type RagItem = {
   id: string;
-  sourceId: string;
-  title?: string;
-  chunkIndex: number;
+  source: string;
+  chunk_index: number;
   text: string;
   embedding: number[];
-  meta?: {
-    authority?: string;
-    topic?: string;
-  };
 };
 
-function cosineSimilarity(a: number[], b: number[]) {
-  let dot = 0;
-  let normA = 0;
-  let normB = 0;
-
-  const len = Math.min(a.length, b.length);
-  for (let i = 0; i < len; i++) {
-    const x = a[i];
-    const y = b[i];
-    dot += x * y;
-    normA += x * x;
-    normB += y * y;
-  }
-
-  if (normA === 0 || normB === 0) return 0;
-  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
-}
+let cachedIndex: RagItem[] | null = null;
 
 function loadRagIndex(): RagItem[] {
+  if (cachedIndex) return cachedIndex;
+
   const indexPath = path.join(process.cwd(), "data", "rag", "index.json");
-  if (!fs.existsSync(indexPath)) return [];
+
+  if (!fs.existsSync(indexPath)) {
+    throw new Error(
+      `RAG index not found at ${indexPath}. Run ingest and commit data/rag/index.json.`
+    );
+  }
 
   const raw = fs.readFileSync(indexPath, "utf8");
   const parsed = JSON.parse(raw);
 
-  return Array.isArray(parsed) ? (parsed as RagItem[]) : [];
+  if (!Array.isArray(parsed)) {
+    throw new Error("RAG index.json format invalid. Expected an array.");
+  }
+
+  cachedIndex = parsed as RagItem[];
+  return cachedIndex;
 }
 
-function buildContext(snippets: RagItem[]) {
-  // Keep context tight and readable
-  return snippets
-    .map((s) => {
-      const labelParts = [
-        s.title || s.sourceId || "source",
-        typeof s.chunkIndex === "number" ? `chunk ${s.chunkIndex}` : null,
-      ].filter(Boolean);
+function cosineSimilarity(a: number[], b: number[]): number {
+  if (!a?.length || !b?.length || a.length !== b.length) return -1;
 
-      const label = labelParts.join(" — ");
-      return `[${label}]\n${s.text}`;
-    })
-    .join("\n\n");
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+
+  const denom = Math.sqrt(normA) * Math.sqrt(normB);
+  return denom === 0 ? -1 : dot / denom;
+}
+
+async function embedQuery(text: string): Promise<number[]> {
+  const emb = await openai.embeddings.create({
+    model: "text-embedding-3-small",
+    input: text,
+  });
+
+  const vec = emb.data?.[0]?.embedding;
+  if (!vec) throw new Error("Failed to create embedding for query.");
+  return vec;
+}
+
+function retrieveTopK(index: RagItem[], queryEmbedding: number[], k = 4) {
+  const scored = index
+    .map((item) => ({
+      item,
+      score: cosineSimilarity(queryEmbedding, item.embedding),
+    }))
+    .sort((a, b) => b.score - a.score);
+
+  return scored.slice(0, k);
 }
 
 export async function POST(req: Request) {
@@ -74,88 +89,55 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "No message provided" }, { status: 400 });
     }
 
-    // 1) Load RAG index
-    const ragIndex = loadRagIndex();
+    const index = loadRagIndex();
+    const queryEmbedding = await embedQuery(userMessage);
+    const top = retrieveTopK(index, queryEmbedding, 4);
 
-    // 2) Embed the user query
-    const q = await openai.embeddings.create({
-      model: "text-embedding-3-small",
-      input: userMessage,
-    });
+    const contextBlocks = top
+      .filter((t) => t.score > 0) // basic guard
+      .map(
+        (t, i) =>
+          `Source ${i + 1} (score ${t.score.toFixed(3)}, ${t.item.source} chunk ${
+            t.item.chunk_index
+          }):\n${t.item.text}`
+      )
+      .join("\n\n---\n\n");
 
-    const queryEmbedding = q.data?.[0]?.embedding;
-    if (!queryEmbedding) {
-      return NextResponse.json({ error: "Embedding failed" }, { status: 500 });
-    }
-
-    // 3) Score and rank chunks
-    const scored = ragIndex
-      .map((item) => ({
-        item,
-        score: cosineSimilarity(queryEmbedding, item.embedding || []),
-      }))
-      .sort((a, b) => b.score - a.score);
-
-    // 4) Prefer authoritative biographical chunks when relevant
-    // If question looks biographical, boost those chunks slightly
-    const bioish =
-      /where.*from|born|raised|hometown|live|living|background|about|bio|family/i.test(
-        userMessage
-      );
-
-    let top = scored.slice(0, 12);
-
-    if (bioish) {
-      // Re-rank with a small bonus for "primary" or "biographical"
-      top = scored
-        .map(({ item, score }) => {
-          const authorityBonus =
-            item?.meta?.authority === "primary" ? 0.05 : 0;
-          const topicBonus = item?.meta?.topic === "biographical" ? 0.05 : 0;
-          return { item, score: score + authorityBonus + topicBonus };
-        })
-        .sort((a, b) => b.score - a.score)
-        .slice(0, 12);
-    }
-
-    // Filter weak matches so we don't feed irrelevant context
-    const MIN_SCORE = 0.20;
-    const topMatches = top
-      .filter((x) => x.score >= MIN_SCORE)
-      .slice(0, 6)
-      .map((x) => x.item);
-
-    const context = topMatches.length ? buildContext(topMatches) : "";
-
-    // 5) Generate answer using retrieved context
-    const system = `
-You are Meghan Molloy’s personal AI assistant on her portfolio website.
-Be clear, warm, professional, and conversational. Keep answers helpful but not verbose.
-
-Rules:
-- Use the CONTEXT to answer factual questions about Meghan (background, location, work history).
-- If the answer is not in the CONTEXT, say you don’t know and suggest where to look (e.g., "check the resume page" or "ask Meghan directly").
-- Do not guess or invent biographical facts.
-`;
-
-    const user = context
-      ? `CONTEXT:\n${context}\n\nQUESTION:\n${userMessage}`
-      : `QUESTION:\n${userMessage}`;
+    const systemPrompt = `You are Meghan Molloy’s personal AI assistant on her portfolio website.
+Use ONLY the provided context to answer questions about Meghan’s background, skills, experience, education, and personal details.
+If the answer is not in the context, say you don’t have that information yet and suggest checking the Resume or About page.
+Be clear, warm, professional, and conversational. Keep answers helpful, not verbose.
+Important: Meghan is from Virginia. Do not invent other locations.`;
 
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
-        { role: "system", content: system.trim() },
-        { role: "user", content: user },
+        { role: "system", content: systemPrompt },
+        {
+          role: "user",
+          content: `Context:\n${contextBlocks || "(no context found)"}\n\nQuestion:\n${userMessage}`,
+        },
       ],
-      temperature: 0.3,
+      temperature: 0.2,
     });
 
     const reply = completion.choices[0]?.message?.content?.trim() || "";
 
-    return NextResponse.json({ reply });
+    return NextResponse.json({
+      reply,
+      debug: {
+        used_index_items: top.map((t) => ({
+          source: t.item.source,
+          chunk_index: t.item.chunk_index,
+          score: Number(t.score.toFixed(3)),
+        })),
+      },
+    });
   } catch (error: any) {
     console.error("Chat API error:", error);
-    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+    return NextResponse.json(
+      { error: "Internal server error", detail: String(error?.message || error) },
+      { status: 500 }
+    );
   }
 }
